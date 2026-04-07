@@ -243,6 +243,127 @@ TEST_P(RuntimeShapeTest, TestFlatSize) {
   EXPECT_EQ(shape.FlatSize(), flat_size);
 }
 
+TEST(RuntimeShapeTest, TestCheckedFlatSize) {
+  const RuntimeShape shape({2, 3, 4});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedFlatSize(flat_size));
+  EXPECT_EQ(flat_size, 24u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeScalar) {
+  const RuntimeShape shape;
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedFlatSize(flat_size));
+  EXPECT_EQ(flat_size, 1u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeRejectsNegativeDim) {
+  const RuntimeShape shape({2, -3, 4});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedFlatSize(flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeRejectsOverflow) {
+  const RuntimeShape shape({std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max()});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedFlatSize(flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRange) {
+  const RuntimeShape shape({2, 3, 4, 5});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedSizeRange(/*start=*/1, /*end=*/3, flat_size));
+  EXPECT_EQ(flat_size, 12u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeToInt) {
+  const RuntimeShape shape({2, 3, 4, 5});
+  int flat_size = 0;
+  EXPECT_TRUE(shape.CheckedSizeRange(/*start=*/1, /*end=*/3, flat_size));
+  EXPECT_EQ(flat_size, 12);
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeAllowsEmptyRange) {
+  const RuntimeShape shape({2, 3, 4});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedSizeRange(/*start=*/1, /*end=*/1, flat_size));
+  EXPECT_EQ(flat_size, 1u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeRejectsInvalidRange) {
+  const RuntimeShape shape({2, 3, 4});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/-1, /*end=*/2, flat_size));
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/2, /*end=*/1, flat_size));
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/0, /*end=*/4, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeRejectsNegativeDim) {
+  const RuntimeShape shape({2, -3, 4});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/0, /*end=*/3, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeRejectsOverflow) {
+  const RuntimeShape shape({std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max()});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/0, /*end=*/3, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeRangeToIntRejectsOverflow) {
+  const RuntimeShape shape({std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max()});
+  int flat_size = 0;
+  EXPECT_FALSE(shape.CheckedSizeRange(/*start=*/0, /*end=*/2, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeToDimension) {
+  const RuntimeShape shape({2, 3, 4, 5});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedSizeToDimension(/*end=*/3, flat_size));
+  EXPECT_EQ(flat_size, 24u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedSizeFromDimension) {
+  const RuntimeShape shape({2, 3, 4, 5});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedSizeFromDimension(/*start=*/1, flat_size));
+  EXPECT_EQ(flat_size, 60u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeSkipDim) {
+  const RuntimeShape shape({2, 3, 4, 5});
+  size_t flat_size = 0;
+  EXPECT_TRUE(shape.CheckedFlatSizeSkipDim(/*skip_dim=*/2, flat_size));
+  EXPECT_EQ(flat_size, 30u);
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeSkipDimRejectsInvalidSkipDim) {
+  const RuntimeShape shape({2, 3, 4});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedFlatSizeSkipDim(/*skip_dim=*/-1, flat_size));
+  EXPECT_FALSE(shape.CheckedFlatSizeSkipDim(/*skip_dim=*/3, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeSkipDimRejectsNegativeDim) {
+  const RuntimeShape shape({2, -3, 4});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedFlatSizeSkipDim(/*skip_dim=*/0, flat_size));
+}
+
+TEST(RuntimeShapeTest, TestCheckedFlatSizeSkipDimRejectsOverflow) {
+  const RuntimeShape shape({std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max(),
+                            std::numeric_limits<int32_t>::max()});
+  size_t flat_size = 0;
+  EXPECT_FALSE(shape.CheckedFlatSizeSkipDim(/*skip_dim=*/0, flat_size));
+}
+
 INSTANTIATE_TEST_SUITE_P(BigSmall, RuntimeShapeTest,
                          testing::Values(kSmallSize, kBigSize),
                          [](const testing::TestParamInfo<int>& info) {

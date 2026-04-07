@@ -17,8 +17,10 @@ limitations under the License.
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "tensorflow/lite/core/c/builtin_op_data.h"
 #include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
@@ -170,30 +172,48 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
   // Allocate temporary tensors.
   size_t input_type_size;
   TF_LITE_ENSURE_STATUS(GetSizeOfType(context, input->type, &input_type_size));
-  const size_t im2col_bytes = batches * out_depth * out_height * out_width *
-                              input_channel * filter_depth * filter_height *
-                              filter_width * input_type_size;
+  size_t im2col_elements = 0;
+  TF_LITE_ENSURE_OK(
+      context,
+      CheckedShapeProduct(
+          context,
+          {batches, out_depth, out_height, out_width, input_channel,
+           filter_depth, filter_height, filter_width},
+          "Conv3D im2col tensor has too many elements.", &im2col_elements));
+  size_t im2col_bytes = 0;
+  TF_LITE_ENSURE_MSG(context,
+                     MultiplyAndCheckOverflow(im2col_elements, input_type_size,
+                                              &im2col_bytes) == kTfLiteOk,
+                     "%s", "Conv3D im2col tensor is too large.");
   TF_LITE_ENSURE_OK(context, AllocateTemporaryTensorsIfRequired(
                                  kernel_type, context, node, opdata, params,
                                  filter, im2col_bytes));
 
   if (opdata->need_im2col) {
-    TfLiteIntArray* im2col_size = TfLiteIntArrayCreate(5);
+    std::unique_ptr<TfLiteIntArray, void (*)(TfLiteIntArray*)> im2col_size(
+        TfLiteIntArrayCreate(5), TfLiteIntArrayFree);
     im2col_size->data[0] = output_size->data[0];
     im2col_size->data[1] = output_size->data[1];
     im2col_size->data[2] = output_size->data[2];
     im2col_size->data[3] = output_size->data[3];
-    im2col_size->data[4] =
-        input_channel * filter_depth * filter_height * filter_width;
+    const RuntimeShape filter_shape = GetTensorShape(filter);
+    int im2col_depth = 0;
+    TF_LITE_ENSURE_MSG(
+        context, filter_shape.CheckedSizeToDimension(/*end=*/4, im2col_depth),
+        "%s", "Conv3D im2col tensor has too many channels.");
+    im2col_size->data[4] = im2col_depth;
 
     TfLiteTensor* im2col;
     node->temporaries->data[opdata->im2col_index] = opdata->im2col_tensor_id;
-    TF_LITE_ENSURE_OK(context, GetTemporarySafe(context, node,
-                                                opdata->im2col_index, &im2col));
+    TfLiteStatus status =
+        GetTemporarySafe(context, node, opdata->im2col_index, &im2col);
+    if (status != kTfLiteOk) {
+      return status;
+    }
     im2col->type = input->type;
     im2col->allocation_type = kTfLiteArenaRw;
-    TF_LITE_ENSURE_OK(context,
-                      context->ResizeTensor(context, im2col, im2col_size));
+    status = context->ResizeTensor(context, im2col, im2col_size.release());
+    TF_LITE_ENSURE_OK(context, status);
   }
 
   return kTfLiteOk;

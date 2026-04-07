@@ -197,6 +197,28 @@ class RuntimeShape {
   // vector.
   int FlatSize() const;
 
+  // Returns false if the range is invalid, if any dimension is negative, or if
+  // the product would overflow size_t.
+  bool CheckedSizeRange(int start, int end, size_t& out) const;
+  bool CheckedSizeRange(int start, int end, int& out) const;
+
+  // Returns the checked product of dimensions in the half-open interval
+  // [0, end).
+  bool CheckedSizeToDimension(int end, size_t& out) const;
+  bool CheckedSizeToDimension(int end, int& out) const;
+
+  // Returns the checked product of dimensions in the half-open interval
+  // [start, DimensionsCount()).
+  bool CheckedSizeFromDimension(int start, size_t& out) const;
+  bool CheckedSizeFromDimension(int start, int& out) const;
+
+  // Returns false if any dimension is negative or if the product would overflow
+  // size_t.
+  bool CheckedFlatSize(size_t& flat_size) const;
+
+  // Like CheckedFlatSize(), but excludes one dimension from the product.
+  bool CheckedFlatSizeSkipDim(int skip_dim, size_t& flat_size) const;
+
   bool operator!=(const RuntimeShape& comp) const { return !((*this) == comp); }
 
  private:

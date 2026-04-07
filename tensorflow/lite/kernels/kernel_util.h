@@ -22,6 +22,7 @@ limitations under the License.
 #include <string>
 #endif  // TF_LITE_STATIC_MEMORY
 
+#include "absl/types/span.h"
 #include "tensorflow/lite/core/c/builtin_op_data.h"
 #include "tensorflow/lite/core/c/common.h"
 #ifndef NDEBUG
@@ -340,6 +341,18 @@ bool IsMobilePlatform();
 
 // Returns whether there is unspecified dimension in the tensor's dim signature.
 bool HasUnspecifiedDimension(const TfLiteTensor* tensor);
+
+// Calculates the product of the given dimensions. Returns an error if any of
+// the dimensions is negative or if the product overflows.
+TfLiteStatus CheckedShapeProduct(TfLiteContext* context,
+                                 absl::Span<const int> dims,
+                                 const char* error_message, size_t* product);
+
+// Calculates the product of the given dimensions. Returns an error if any of
+// the dimensions is negative or if the product overflows.
+TfLiteStatus CheckedShapeProductToInt(TfLiteContext* context,
+                                      absl::Span<const int> dims,
+                                      const char* error_message, int* product);
 
 }  // namespace tflite
 

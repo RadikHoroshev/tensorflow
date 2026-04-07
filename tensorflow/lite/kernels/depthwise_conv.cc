@@ -41,12 +41,12 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/kernels/padding.h"
+#include "tensorflow/lite/util.h"
 
 namespace tflite {
 namespace ops {
 namespace builtin {
 namespace depthwise_conv {
-
 constexpr int kInputTensor = 0;
 constexpr int kFilterTensor = 1;
 constexpr int kBiasTensor = 2;
@@ -141,6 +141,12 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
                                 data_type == kTfLiteInt16 ||
                                 filter->type == kTfLiteInt4);
   }
+  if (filter->type == kTfLiteInt4) {
+    int filter_num_elements = 0;
+    TF_LITE_ENSURE_MSG(
+        context, CheckedNumElements(filter, &filter_num_elements) == kTfLiteOk,
+        "%s", "DepthwiseConv int4 filter has too many elements.");
+  }
 
   if (data_type == kTfLiteInt16) {
     TF_LITE_ENSURE_EQ(context, input->params.zero_point, 0);
@@ -217,6 +223,12 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     TF_LITE_ENSURE_EQ(
         context, affine_quantization->scale->size,
         filter->dims->data[affine_quantization->quantized_dimension]);
+    // Eval uses NumElements(input) in int arithmetic for per-batch
+    // quantization, so reject oversized shapes during Prepare.
+    int input_num_elements = 0;
+    TF_LITE_ENSURE_MSG(
+        context, CheckedNumElements(input, &input_num_elements) == kTfLiteOk,
+        "%s", "DepthwiseConv hybrid input has too many elements.");
 
     int temporaries_count = 0;
     data->input_quantized_index = temporaries_count;

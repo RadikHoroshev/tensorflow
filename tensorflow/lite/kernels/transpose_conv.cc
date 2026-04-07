@@ -35,6 +35,7 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/kernels/padding.h"
+#include "tensorflow/lite/util.h"
 
 namespace tflite {
 namespace ops {
@@ -216,9 +217,18 @@ TfLiteStatus ResizeCol2ImTensor(TfLiteContext* context,
   TfLiteIntArray* col2im_shape_array = TfLiteIntArrayCreate(2);
   const RuntimeShape& input_shape = GetTensorShape(input);
   const RuntimeShape& weights_shape = GetTensorShape(weights);
-  col2im_shape_array->data[0] = input_shape.Dims(1) * input_shape.Dims(2);
-  col2im_shape_array->data[1] =
-      weights_shape.Dims(0) * weights_shape.Dims(1) * weights_shape.Dims(2);
+  int col2im_rows = 0;
+  TF_LITE_ENSURE_MSG(
+      context,
+      input_shape.CheckedSizeRange(/*start=*/1, /*end=*/3, col2im_rows), "%s",
+      "TransposeConv col2im tensor has too many rows.");
+  col2im_shape_array->data[0] = col2im_rows;
+
+  int col2im_columns = 0;
+  TF_LITE_ENSURE_MSG(
+      context, weights_shape.CheckedSizeToDimension(/*end=*/3, col2im_columns),
+      "%s", "TransposeConv col2im tensor has too many columns.");
+  col2im_shape_array->data[1] = col2im_columns;
 
   col2im->type = input->type == kTfLiteFloat32 ? kTfLiteFloat32 : kTfLiteInt32;
   col2im->allocation_type = kTfLiteDynamic;
@@ -468,7 +478,11 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
     // flattened to 2D.
     const int channels_in = weights->dims->data[3];
     TF_LITE_ENSURE(context, channels_in != 0);
-    const int height = NumElements(input) / channels_in;
+    int input_num_elements = 0;
+    TF_LITE_ENSURE_MSG(
+        context, CheckedNumElements(input, &input_num_elements) == kTfLiteOk,
+        "%s", "TransposeConv hybrid input has too many elements.");
+    const int height = input_num_elements / channels_in;
     int scaling_dims[1] = {height};
     if (!TfLiteIntArrayEqualsArray(scaling_factors->dims, 1, scaling_dims)) {
       TfLiteIntArray* scaling_factors_size = TfLiteIntArrayCreate(1);

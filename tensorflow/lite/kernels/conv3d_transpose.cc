@@ -25,6 +25,7 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
 #include "tensorflow/lite/kernels/padding.h"
+#include "tensorflow/lite/util.h"
 
 namespace tflite {
 namespace ops {
@@ -59,6 +60,13 @@ void Free(TfLiteContext* context, void* buffer) {
   delete static_cast<OpData*>(buffer);
 }
 
+namespace {
+
+constexpr const char* kConv3dTransposeNegativeDimensionError =
+    "Conv3DTranspose output shape has a negative dimension.";
+
+}  // namespace
+
 static TfLiteStatus AllocateTemporaryTensorsIfRequired(TfLiteContext* context,
                                                        TfLiteNode* node,
                                                        KernelType kernel_type) {
@@ -85,10 +93,16 @@ TfLiteStatus ResizeOutputAndTemporaryTensors(
     const TfLiteTensor* shape_tensor, const TfLiteTensor* filter,
     const TfLiteTensor* input, TfLiteTensor* col2im, TfLiteTensor* output) {
   auto shape_data = GetTensorData<int32_t>(shape_tensor);
+  for (int i = 0; i < NumElements(shape_tensor); ++i) {
+    TF_LITE_ENSURE_MSG(context, shape_data[i] >= 0, "%s",
+                       kConv3dTransposeNegativeDimensionError);
+  }
   // Output and input tensor must have the same batch size.
   TF_LITE_ENSURE_EQ(context, shape_data[0], SizeOfDimension(input, 0));
   // The number of channels of output must be divisible by that of filter.
-  TF_LITE_ENSURE_EQ(context, shape_data[4] % SizeOfDimension(filter, 3), 0);
+  const int filter_output_channels = SizeOfDimension(filter, 3);
+  TF_LITE_ENSURE(context, filter_output_channels != 0);
+  TF_LITE_ENSURE_EQ(context, shape_data[4] % filter_output_channels, 0);
 
   // Compute padding.
   const RuntimeShape& filter_shape = GetTensorShape(filter);
@@ -122,10 +136,18 @@ TfLiteStatus ResizeOutputAndTemporaryTensors(
   if (opdata->need_col2im) {
     TfLiteIntArray* col2im_shape_array = TfLiteIntArrayCreate(2);
     const RuntimeShape& input_shape = GetTensorShape(input);
-    col2im_shape_array->data[0] =
-        input_shape.Dims(1) * input_shape.Dims(2) * input_shape.Dims(3);
-    col2im_shape_array->data[1] =
-        filter_depth * filter_height * filter_width * filter_shape.Dims(3);
+    int col2im_rows = 0;
+    TF_LITE_ENSURE_MSG(
+        context,
+        input_shape.CheckedSizeRange(/*start=*/1, /*end=*/4, col2im_rows), "%s",
+        "Conv3DTranspose col2im tensor has too many rows.");
+    col2im_shape_array->data[0] = col2im_rows;
+
+    int col2im_columns = 0;
+    TF_LITE_ENSURE_MSG(
+        context, filter_shape.CheckedSizeToDimension(/*end=*/4, col2im_columns),
+        "%s", "Conv3DTranspose col2im tensor has too many columns.");
+    col2im_shape_array->data[1] = col2im_columns;
 
     col2im->type = kTfLiteFloat32;
     col2im->allocation_type = kTfLiteDynamic;

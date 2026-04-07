@@ -17,6 +17,7 @@ limitations under the License.
 #include <stddef.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <vector>
@@ -25,7 +26,7 @@ limitations under the License.
 #if !defined(TFLITE_WITH_RUY)
 #define TFLITE_WITH_MULTITHREADED_EIGEN
 #endif
-
+#include "absl/types/span.h"
 #include "tensorflow/lite/core/c/builtin_op_data.h"
 #include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
@@ -42,6 +43,7 @@ limitations under the License.
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
 #include "tensorflow/lite/kernels/internal/reference/conv.h"
 #include "tensorflow/lite/kernels/internal/reference/integer_ops/conv.h"
+#include "tensorflow/lite/kernels/internal/runtime_shape.h"
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/internal/tensor_utils.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -424,6 +426,19 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
        (filter->type == kTfLiteUInt8 || filter->type == kTfLiteInt8 ||
         filter->type == kTfLiteInt4));
 
+  if (is_hybrid) {
+    int input_num_elements = 0;
+    TF_LITE_ENSURE_MSG(
+        context, CheckedNumElements(input, &input_num_elements) == kTfLiteOk,
+        "%s", "Conv hybrid input has too many elements.");
+  }
+  if (filter->type == kTfLiteInt4) {
+    int filter_num_elements = 0;
+    TF_LITE_ENSURE_MSG(
+        context, CheckedNumElements(filter, &filter_num_elements) == kTfLiteOk,
+        "%s", "Conv int4 filter has too many elements.");
+  }
+
   if (filter->quantization.type == kTfLiteAffineQuantization) {
     TF_LITE_ENSURE(context, filter->quantization.params);
     TF_LITE_ENSURE(context, reinterpret_cast<TfLiteAffineQuantization*>(
@@ -456,11 +471,13 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
       (params->dilation_width_factor == 1) &&
       (params->dilation_height_factor == 1) &&
       (filter->allocation_type != kTfLiteArenaRw) && !IsDynamicTensor(filter);
+  data->need_hwcn_weights =
+      input->type == kTfLiteFloat32 && data->supports_multithreaded_kernel;
 
   int channels_in = filter->dims->data[3];
   int channels_out = filter->dims->data[0];
-  int width = input->dims->data[2];
-  int height = input->dims->data[1];
+  int input_width = input->dims->data[2];
+  int input_height = input->dims->data[1];
   int filter_width = filter->dims->data[2];
   int filter_height = filter->dims->data[1];
   int batches = input->dims->data[0];
@@ -470,19 +487,32 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
   int out_width, out_height;
   data->padding = ComputePaddingHeightWidth(
       params->stride_height, params->stride_width,
-      params->dilation_height_factor, params->dilation_width_factor, height,
-      width, filter_height, filter_width, padding, &out_height, &out_width);
+      params->dilation_height_factor, params->dilation_width_factor,
+      input_height, input_width, filter_height, filter_width, padding,
+      &out_height, &out_width);
 
   size_t im2col_type_size;
   TF_LITE_ENSURE_STATUS(GetSizeOfType(context, input->type, &im2col_type_size));
-  // Note that we intentionally promote the first multiplicand (i.e. 'batches')
-  // to 'size_t' to avoid integer overflow here.
-  const size_t im2col_elements = static_cast<size_t>(batches) * out_height *
-                                 out_width * channels_in * filter_height *
-                                 filter_width;
+  size_t im2col_elements = 0;
+  size_t im2col_bytes = 0;
+  const bool requires_im2col =
+      IsIm2ColRequired(input, params, filter, data, is_hybrid, kernel_type);
+  if (requires_im2col) {
+    TF_LITE_ENSURE_OK(
+        context,
+        CheckedShapeProduct(context,
+                            {batches, out_height, out_width, channels_in,
+                             filter_height, filter_width},
+                            "Conv im2col size overflowed.", &im2col_elements));
+    TF_LITE_ENSURE_MSG(
+        context,
+        MultiplyAndCheckOverflow(im2col_elements, im2col_type_size,
+                                 &im2col_bytes) == kTfLiteOk,
+        "Conv im2col byte size overflowed.");
+  }
   TF_LITE_ENSURE_STATUS(AllocateTemporaryTensorsIfRequired(
       context, node, is_hybrid, data->is_hybrid_per_channel, kernel_type,
-      /*im2col_bytes=*/im2col_elements * im2col_type_size));
+      /*im2col_bytes=*/im2col_bytes));
 
   TF_LITE_ENSURE(context, has_bias);
 
@@ -519,6 +549,8 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
 
   if (output_status != kTfLiteOk) return output_status;
 
+  const RuntimeShape filter_shape = GetTensorShape(filter);
+
   if (data->need_im2col) {
     // Protect downstream kernels (Im2col, TransposeIm2col) that rely
     // on 32-bit signed integers for their FlatSize() and pointer arithmetic.
@@ -532,12 +564,15 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
     node->temporaries->data[data->im2col_index] = data->im2col_id;
 
     TfLiteIntArray* im2col_size = TfLiteIntArrayCreate(4);
-
-    auto filter_input_channel = filter->dims->data[3];
+    int im2col_depth = 0;
+    TF_LITE_ENSURE_MSG(
+        context,
+        filter_shape.CheckedSizeFromDimension(/*start=*/1, im2col_depth), "%s",
+        "Conv im2col depth overflowed.");
     im2col_size->data[0] = output_size->data[0];
     im2col_size->data[1] = output_size->data[1];
     im2col_size->data[2] = output_size->data[2];
-    im2col_size->data[3] = filter_input_channel * filter_height * filter_width;
+    im2col_size->data[3] = im2col_depth;
 
     TfLiteTensor* im2col =
         &context->tensors[node->temporaries->data[data->im2col_index]];
@@ -558,9 +593,21 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
     // transpose, we allocate the buffer with a two-dimensional shape, where one
     // dimension is the number of elements in each filter, and the second is the
     // total number of filters.
-    auto filter_input_channel = filter->dims->data[3];
-    hwcn_weights_size->data[0] =
-        (filter_height * filter_width * filter_input_channel);
+    int hwcn_filter_size = 0;
+    TF_LITE_ENSURE_MSG(
+        context,
+        filter_shape.CheckedSizeFromDimension(/*start=*/1, hwcn_filter_size),
+        "%s", "Conv HWCN weights size overflowed.");
+    size_t hwcn_weights_elements = 0;
+    TF_LITE_ENSURE_OK(
+        context, CheckedShapeProduct(context, {hwcn_filter_size, channels_out},
+                                     "Conv HWCN weights indexing overflowed.",
+                                     &hwcn_weights_elements));
+    TF_LITE_ENSURE_MSG(context,
+                       hwcn_weights_elements <=
+                           static_cast<size_t>(std::numeric_limits<int>::max()),
+                       "Conv HWCN weights indexing overflowed.");
+    hwcn_weights_size->data[0] = hwcn_filter_size;
     hwcn_weights_size->data[1] = channels_out;
 
     TfLiteTensor* hwcn_weights =
@@ -605,11 +652,17 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
     // implementation for why we need to allocate for the height of the inputs
     // flattened to 2D.
     TF_LITE_ENSURE(context, channels_in != 0);
-    const int height = NumElements(input) / channels_in;
-    int scaling_dims[1] = {height};
+    int flattened_input_height = 0;
+    TF_LITE_ENSURE_OK(
+        context,
+        CheckedShapeProductToInt(
+            context, {batches, input_height, input_width, data->groups},
+            "Conv hybrid scaling factors size overflowed.",
+            &flattened_input_height));
+    int scaling_dims[1] = {flattened_input_height};
     if (!TfLiteIntArrayEqualsArray(scaling_factors->dims, 1, scaling_dims)) {
       TfLiteIntArray* scaling_factors_size = TfLiteIntArrayCreate(1);
-      scaling_factors_size->data[0] = height;
+      scaling_factors_size->data[0] = flattened_input_height;
       TF_LITE_ENSURE_OK(context, context->ResizeTensor(context, scaling_factors,
                                                        scaling_factors_size));
     }
@@ -621,7 +674,20 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
                                        &accum_scratch));
     accum_scratch->type = kTfLiteInt32;
     accum_scratch->allocation_type = kTfLiteArenaRw;
-    const int scratch_width = batches * out_height * out_width;
+    int scratch_width = 0;
+    TF_LITE_ENSURE_OK(
+        context, CheckedShapeProductToInt(
+                     context, {batches, out_height, out_width},
+                     "Conv hybrid scratch size overflowed.", &scratch_width));
+    size_t accum_scratch_elements = 0;
+    TF_LITE_ENSURE_OK(
+        context, CheckedShapeProduct(context, {channels_out, scratch_width},
+                                     "Conv hybrid scratch indexing overflowed.",
+                                     &accum_scratch_elements));
+    TF_LITE_ENSURE_MSG(context,
+                       accum_scratch_elements <=
+                           static_cast<size_t>(std::numeric_limits<int>::max()),
+                       "Conv hybrid scratch indexing overflowed.");
     int accum_scratch_dims[2] = {channels_out, scratch_width};
     if (!TfLiteIntArrayEqualsArray(accum_scratch->dims, 2,
                                    accum_scratch_dims)) {
@@ -650,8 +716,7 @@ TfLiteStatus Prepare(KernelType kernel_type, TfLiteContext* context,
       input_offsets->allocation_type = kTfLiteArenaRw;
       // See above comment for the need to allocate for height of inputs.
       TF_LITE_ENSURE(context, channels_in != 0);
-      const int height = NumElements(input) / channels_in;
-      const int input_offset_dims[1] = {height};
+      const int input_offset_dims[1] = {flattened_input_height};
       if (!TfLiteIntArrayEqualsArray(input_offsets->dims, 1,
                                      input_offset_dims)) {
         TfLiteIntArray* input_offsets_size = TfLiteIntArrayCreate(1);
